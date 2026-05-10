@@ -94,7 +94,7 @@ export default function App() {
     setIsLoading(true); setError(null); setIsCopied(false); stopSpeaking();
     try {
       // ✅ CORREÇÃO: Vite expõe variáveis com prefixo VITE_ via import.meta.env
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       if (!apiKey) throw new Error('Chave de API não configurada no ambiente.');
 
       const ai = new GoogleGenAI({ apiKey });
