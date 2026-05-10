@@ -54,61 +54,91 @@ export default function App() {
   const chunksRef = useRef<string[]>([]);
   const currentChunkIndexRef = useRef(0);
 
-  // ✅ CORREÇÃO: Carrega TODAS as vozes e aguarda o mobile carregar
+  // ✅ CORREÇÃO: Carregar TODAS as vozes (sem filtro Elite) e tratar mobile corretamente
   useEffect(() => {
+    let loadAttempts = 0;
+    const maxAttempts = 5;
+    
     const loadVoices = () => {
+      loadAttempts++;
       const availableVoices = window.speechSynthesis.getVoices();
       
-      // Removemos o filtro "Elite" para mostrar todas as vozes do sistema (funciona em todos os celulares)
+      // ✅ MOSTRAR TODAS AS VOZES (sem filtro)
       setVoices(availableVoices);
       
       const targetLang = LANG_MAP[language];
-      // Tenta achar voz do idioma, se não tiver, usa a primeira que achar
       const langVoices = availableVoices.filter(v => v.lang.startsWith(targetLang));
       
-      // Lógica de seleção: Tenta pegar a padrão do idioma, senão pega a primeira da lista geral
+      // Auto-select: tenta pegar voz do idioma, senão a primeira disponível
       const bestMatch = langVoices[0] || availableVoices[0];
-      
       if (bestMatch) {
         setSelectedVoice(bestMatch);
       }
+      
+      // Debug: mostra quantas vozes carregaram
+      console.log(`Vozes carregadas: ${availableVoices.length} (tentativa ${loadAttempts})`);
     };
 
-    // Tenta carregar imediatamente
+    // Tentativa inicial
     loadVoices();
     
-    // Mobile: O evento onvoiceschanged é obrigatório pois as vozes carregam depois
+    // Mobile: aguardar evento onvoiceschanged
     window.speechSynthesis.onvoiceschanged = loadVoices;
+    
+    // Fallback: tentar carregar novamente após 500ms se ainda estiver vazio
+    const timeoutId = setTimeout(() => {
+      if (voices.length === 0) {
+        console.log('Tentativa de carregamento forçado...');
+        loadVoices();
+      }
+    }, 500);
 
     return () => { 
-      window.speechSynthesis.onvoiceschanged = null; 
+      window.speechSynthesis.onvoiceschanged = null;
+      clearTimeout(timeoutId);
     };
   }, [language]);
 
-  // Filtra as vozes para o idioma selecionado na hora de mostrar na lista
+  // Filtra as vozes para o idioma selecionado
   const sortedVoices = voices.filter(v => v.lang.startsWith(LANG_MAP[language]));
 
   const prepareChunks = (text: string) => text.match(/[^.!?]+[.!?]*|[^.!?]+/g) || [text];
   
   const playNextChunk = () => {
     if (currentChunkIndexRef.current >= chunksRef.current.length) {
-      setIsSpeaking(false); 
-      setIsPaused(false); 
-      currentChunkIndexRef.current = 0; 
+      setIsSpeaking(false);
+      setIsPaused(false);
+      currentChunkIndexRef.current = 0;
       return;
     }
     const text = chunksRef.current[currentChunkIndexRef.current];
     const utterance = new SpeechSynthesisUtterance(text);
     
-    // ✅ CORREÇÃO: Fallback de segurança. Se a voz selecionada não for válida, usa a primeira da lista
-    const safeVoice = voices.includes(selectedVoice!) ? selectedVoice : voices[0];
-    if (safeVoice) utterance.voice = safeVoice;
+    // Fallback: se a voz selecionada não existir, usa a primeira disponível
+    const safeVoice = selectedVoice && voices.includes(selectedVoice) 
+      ? selectedVoice 
+      : voices[0];
     
+    if (safeVoice) utterance.voice = safeVoice;
     utterance.rate = speakingRate;
     
-    utterance.onstart = () => { setIsSpeaking(true); setIsPaused(false); };
-    utterance.onend = () => { if (!isPaused) { currentChunkIndexRef.current++; playNextChunk(); } };
-    utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+      setIsPaused(false);
+    };
+    
+    utterance.onend = () => {
+      if (!isPaused) {
+        currentChunkIndexRef.current++;
+        playNextChunk();
+      }
+    };
+    
+    utterance.onerror = (event) => {
+      console.error('Speech error:', event);
+      setIsSpeaking(false);
+      setIsPaused(false);
+    };
     
     window.speechSynthesis.speak(utterance);
   };
@@ -116,10 +146,13 @@ export default function App() {
   const speak = () => {
     if (!output) return;
     
-    // Verifica se as vozes já carregaram (importante no mobile)
+    // Verifica se tem vozes carregadas
     if (voices.length === 0) {
-      window.speechSynthesis.getVoices(); // Tenta forçar o carregamento
-      return; 
+      // Tenta carregar novamente
+      window.speechSynthesis.getVoices();
+      setError('Vozes ainda carregando. Tente novamente em 2 segundos.');
+      setTimeout(() => setError(null), 3000);
+      return;
     }
 
     if (isPaused) {
@@ -154,13 +187,17 @@ export default function App() {
     setError(null);
     setIsCopied(false);
     stopSpeaking();
+
     try {
-      // ✅ CORREÇÃO: API Key correta para Vercel
+      // ✅ CORREÇÃO: API key correta para Vercel
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       
-      if (!apiKey) throw new Error('Chave de API não configurada no ambiente.');
+      if (!apiKey) {
+        throw new Error('Chave de API não configurada no ambiente.');
+      }
 
       const ai = new GoogleGenAI({ apiKey });
+      
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         config: {
@@ -168,6 +205,7 @@ export default function App() {
         },
         contents: `Language: ${language}\nStyle/Tone (Optional): ${style || 'Natural'}\n\nText:\n${input}`,
       });
+
       setOutput(response.text || 'Ocorreu um erro na tradução.');
     } catch (err: any) {
       console.error(err);
@@ -183,10 +221,17 @@ export default function App() {
       await navigator.clipboard.writeText(output);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2000);
-    } catch (err) { console.error('Failed to copy!', err); }
+    } catch (err) {
+      console.error('Failed to copy!', err);
+    }
   };
 
-  const getStats = (text: string) => ({ chars: text.length, words: text.trim() ? text.trim().split(/\s+/).length : 0 });
+  const getStats = (text: string) => {
+    const chars = text.length;
+    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    return { chars, words };
+  };
+  
   const inputStats = getStats(input);
   const outputStats = getStats(output);
 
@@ -195,9 +240,9 @@ export default function App() {
       <main className="max-w-6xl mx-auto p-4 md:p-8">
         
         {/* Header */}
-        <motion.header 
-          initial={{ opacity: 0, y: -20 }} 
-          animate={{ opacity: 1, y: 0 }} 
+        <motion.header
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
           className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8"
         >
           <div className="flex items-center gap-4">
@@ -212,24 +257,46 @@ export default function App() {
             </div>
           </div>
 
-          {/* Audio Controls - Mobile Friendly Layout */}
+          {/* Audio Controls - Mobile Friendly */}
           <div className="flex flex-col sm:flex-row flex-wrap items-center gap-3 w-full lg:w-auto bg-[#0f172a]/80 border border-[#bf953f]/40 rounded-2xl p-3 lg:p-1.5 shadow-2xl backdrop-blur-xl">
             <div className="flex items-center gap-2 sm:gap-1 w-full sm:w-auto border-b sm:border-b-0 sm:border-r border-[#334155] pb-2 sm:pb-0 sm:pr-2">
-              <button onClick={isSpeaking ? pauseSpeaking : speak} disabled={!output} 
-                className={`flex-1 sm:flex-none p-3 rounded-xl flex items-center justify-center transition-all shadow-lg active:scale-95 disabled:opacity-20 disabled:grayscale ${isSpeaking ? 'bg-[#bf953f] text-black' : 'bg-gradient-to-br from-[#bf953f] to-[#aa771c] text-black'}`}>
+              <button 
+                onClick={isSpeaking ? pauseSpeaking : speak}
+                disabled={!output}
+                className={`flex-1 sm:flex-none p-3 rounded-xl flex items-center justify-center transition-all shadow-lg active:scale-95 disabled:opacity-20 disabled:grayscale ${
+                  isSpeaking 
+                    ? 'bg-[#bf953f] text-black' 
+                    : 'bg-gradient-to-br from-[#bf953f] to-[#aa771c] text-black'
+                }`}
+                title={isSpeaking ? "Pausar" : "Ouvir"}
+              >
                 {isSpeaking ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
               </button>
-              <button onClick={stopSpeaking} disabled={!isSpeaking && !isPaused} className="p-3 rounded-xl text-[#bf953f] hover:bg-[#bf953f]/10 transition-all active:scale-95 disabled:opacity-20">
+              <button 
+                onClick={stopSpeaking}
+                disabled={!isSpeaking && !isPaused}
+                className="p-3 rounded-xl text-[#bf953f] hover:bg-[#bf953f]/10 transition-all active:scale-95 disabled:opacity-20"
+                title="Sair / Reset"
+              >
                 <RotateCcw className="w-5 h-5" />
               </button>
             </div>
             
             <div className="relative group flex-1 sm:min-w-[200px] w-full">
               <Volume2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#bf953f] pointer-events-none" />
-              <select value={selectedVoice?.name || ''} 
-                onChange={(e) => { const v = sortedVoices.find(v => v.name === e.target.value); if (v) setSelectedVoice(v); }}
-                className="w-full bg-black/40 border border-[#334155] rounded-xl pl-9 pr-6 py-3 text-xs font-bold text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] appearance-none cursor-pointer transition-all">
-                {sortedVoices.map(v => (<option key={v.name} value={v.name} className="bg-[#0f172a]">{v.name.substring(0, 30)}</option>))}
+              <select 
+                value={selectedVoice?.name || ''}
+                onChange={(e) => {
+                  const voice = sortedVoices.find(v => v.name === e.target.value);
+                  if (voice) setSelectedVoice(voice);
+                }}
+                className="w-full bg-black/40 border border-[#334155] rounded-xl pl-9 pr-6 py-3 text-xs font-bold text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] appearance-none cursor-pointer transition-all"
+              >
+                {sortedVoices.map(voice => (
+                  <option key={voice.name} value={voice.name} className="bg-[#0f172a]">
+                    {voice.name.substring(0, 30)}
+                  </option>
+                ))}
                 {sortedVoices.length === 0 && <option>Carregando vozes...</option>}
               </select>
               <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 text-[#bf953f] pointer-events-none opacity-40" />
@@ -237,50 +304,113 @@ export default function App() {
 
             <div className="flex items-center gap-3 px-3 py-2.5 bg-black/40 rounded-xl border border-white/5 w-full sm:min-w-[120px]">
               <span className="text-[9px] font-black tracking-widest text-[#bf953f] uppercase w-6">{speakingRate}x</span>
-              <input type="range" min="0.5" max="2" step="0.1" value={speakingRate} onChange={(e) => setSpeakingRate(parseFloat(e.target.value))} className="w-full h-1 bg-[#334155] rounded-full appearance-none cursor-pointer accent-[#bf953f]" />
+              <input 
+                type="range" 
+                min="0.5" 
+                max="2" 
+                step="0.1" 
+                value={speakingRate}
+                onChange={(e) => setSpeakingRate(parseFloat(e.target.value))}
+                className="w-full h-1 bg-[#334155] rounded-full appearance-none cursor-pointer accent-[#bf953f]"
+              />
             </div>
           </div>
         </motion.header>
 
         {/* Content Card */}
-        <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.1 }} className="bg-[#0f172a] border-2 border-[#bf953f]/30 rounded-3xl p-6 md:p-10 shadow-2xl relative overflow-hidden">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.98 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay: 0.1 }}
+          className="bg-[#0f172a] border-2 border-[#bf953f]/30 rounded-3xl p-6 md:p-10 shadow-2xl relative overflow-hidden"
+        >
           <div className="space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest flex items-center gap-2 opacity-60"><Languages className="w-3 h-3 text-[#bf953f]" /> Idioma de Destino</label>
-                <select value={language} onChange={(e) => setLanguage(e.target.value)} className="w-full bg-[#1e293b] border border-[#334155] rounded-xl px-4 py-4 text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] transition-all">
+                <label className="text-xs font-bold uppercase tracking-widest flex items-center gap-2 opacity-60">
+                  <Languages className="w-3 h-3 text-[#bf953f]" /> Idioma de Destino
+                </label>
+                <select 
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  className="w-full bg-[#1e293b] border border-[#334155] rounded-xl px-4 py-4 text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] transition-all"
+                >
                   {Object.keys(LANG_MAP).map(lang => <option key={lang}>{lang}</option>)}
                 </select>
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest flex items-center gap-2 opacity-60"><Wand2 className="w-3 h-3 text-[#bf953f]" /> Estilo / Tom</label>
-                <input type="text" value={style} onChange={(e) => setStyle(e.target.value)} placeholder="Ex: Tom de mistério..." className="w-full bg-[#1e293b] border border-[#334155] rounded-xl px-4 py-4 text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] transition-all" />
+                <label className="text-xs font-bold uppercase tracking-widest flex items-center gap-2 opacity-60">
+                  <Wand2 className="w-3 h-3 text-[#bf953f]" /> Estilo / Tom
+                </label>
+                <input 
+                  type="text" 
+                  value={style}
+                  onChange={(e) => setStyle(e.target.value)}
+                  placeholder="Ex: Tom de mistério..."
+                  className="w-full bg-[#1e293b] border border-[#334155] rounded-xl px-4 py-4 text-[#fcf6ba] focus:outline-none focus:border-[#bf953f] transition-all"
+                />
               </div>
             </div>
 
-            {/* Text Areas - Adjusted for Mobile Height */}
+            {/* Text Areas */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 min-h-[400px]">
               <div className="flex flex-col">
-                <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Insira o texto..." className="flex-1 w-full bg-black/40 border border-[#334155] rounded-3xl p-6 text-white resize-none focus:outline-none focus:border-[#bf953f]/50" />
-                <div className="mt-2 text-right text-[9px] font-bold tracking-widest text-[#bf953f]/60"><span>{inputStats.words} PALAVRAS</span></div>
+                <textarea 
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Insira o texto..."
+                  className="flex-1 w-full bg-black/40 border border-[#334155] rounded-3xl p-6 text-white resize-none focus:outline-none focus:border-[#bf953f]/50"
+                />
+                <div className="mt-2 text-right text-[9px] font-bold tracking-widest text-[#bf953f]/60">
+                  <span>{inputStats.words} PALAVRAS</span>
+                </div>
               </div>
               <div className="flex flex-col relative">
-                <textarea readOnly value={output} placeholder="Tradução aqui..." className="flex-1 w-full bg-black/60 border border-[#bf953f]/30 rounded-3xl p-6 text-[#fcf6ba] resize-none focus:outline-none" />
-                {isLoading && (<div className="absolute inset-0 bg-[#020617]/80 backdrop-blur-sm flex flex-col items-center justify-center gap-4 z-10 rounded-3xl"><Loader2 className="w-12 h-12 text-[#bf953f] animate-spin" /><p className="text-[#bf953f] text-xs font-bold uppercase">Processando...</p></div>)}
+                <textarea 
+                  readOnly
+                  value={output}
+                  placeholder="Tradução aqui..."
+                  className="flex-1 w-full bg-black/60 border border-[#bf953f]/30 rounded-3xl p-6 text-[#fcf6ba] resize-none focus:outline-none"
+                />
+                {isLoading && (
+                  <div className="absolute inset-0 bg-[#020617]/80 backdrop-blur-sm flex flex-col items-center justify-center gap-4 z-10 rounded-3xl">
+                    <Loader2 className="w-12 h-12 text-[#bf953f] animate-spin" />
+                    <p className="text-[#bf953f] text-xs font-bold uppercase">Processando...</p>
+                  </div>
+                )}
                 {output && !isLoading && (
-                  <button onClick={copyToClipboard} className="absolute top-4 right-4 p-2 rounded-lg bg-[#bf953f] text-black hover:bg-[#fcf6ba] active:scale-95 z-20">
+                  <button 
+                    onClick={copyToClipboard}
+                    className="absolute top-4 right-4 p-2 rounded-lg bg-[#bf953f] text-black hover:bg-[#fcf6ba] active:scale-95 z-20"
+                  >
                     {isCopied ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   </button>
                 )}
               </div>
             </div>
 
-            {error && <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-xl text-red-200 text-sm">{error}</div>}
+            {error && (
+              <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-xl text-red-200 text-sm">
+                {error}
+              </div>
+            )}
 
-            <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={translate} disabled={isLoading || !input.trim()} className="w-full relative group">
+            <motion.button
+              whileHover={{ scale: 1.01 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={translate}
+              disabled={isLoading || !input.trim()}
+              className="w-full relative group"
+            >
               <div className="absolute inset-0 bg-gradient-to-r from-[#bf953f] via-[#fcf6ba] to-[#aa771c] rounded-2xl blur-xl opacity-30 group-disabled:hidden" />
               <div className="relative w-full bg-gradient-to-r from-[#bf953f] via-[#fcf6ba] to-[#aa771c] px-8 py-5 rounded-2xl text-black font-black text-lg flex items-center justify-center gap-4 uppercase italic shadow-2xl group-disabled:opacity-40">
-                {isLoading ? <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> Processando</span> : <>Executar Tradução <ChevronRight className="w-6 h-6" /></>}
+                {isLoading ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin" /> Processando
+                  </span>
+                ) : (
+                  <>Executar Tradução <ChevronRight className="w-6 h-6" /></>
+                )}
               </div>
             </motion.button>
           </div>
